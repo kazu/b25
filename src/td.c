@@ -15,6 +15,7 @@
 	#include <inttypes.h>
 	#include <unistd.h>
         #include <errno.h>
+	#include <pthread.h>
 #endif
 
 #include "arib_std_b25.h"
@@ -28,10 +29,28 @@ typedef struct {
 	int32_t power_ctrl;
 } OPTION;
 
+
+typedef struct {
+  int flag; // 0 - no use .  1 loading. 2 loaded, 3 b25
+  void *next;
+  int32_t size;
+  uint8_t data[8*1024];
+} ring_buffer;
+
+typedef struct {
+  int sfd;
+  ring_buffer *rbuf;
+  ARIB_STD_B25 *b25;
+} loader_args; 
+
+
+
 static void show_usage();
 static int parse_arg(OPTION *dst, int argc, char **argv);
 static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt);
 static void show_bcas_power_on_control_info(B_CAS_CARD *bcas);
+static int init_ring_buffer(ring_buffer *rbuf,int size);
+
 
 int main(int argc, char **argv)
 {
@@ -148,6 +167,59 @@ static int parse_arg(OPTION *dst, int argc, char **argv)
 	return i;
 }
 
+void *loader_main(void *args)
+{
+	loader_args *largs = (loader_args *) args;
+	int sfd;
+	int n;
+	ring_buffer *rbuf;
+	ARIB_STD_B25 *b25;
+	ring_buffer *cbuf;
+
+	sfd = largs->sfd;
+	rbuf = largs->rbuf;
+	b25 = largs->b25;
+
+	//printf("called!\n");
+
+	cbuf = &rbuf[0];
+	while(1) {
+	  	if(cbuf->flag != 0 ){
+			cbuf = cbuf->next;
+			continue;
+		}
+		cbuf->flag = 1;
+		n = _read(sfd, cbuf->data, sizeof(cbuf->data));
+		if( n < 1 ){
+			if( errno == 75 ) {
+				fprintf(stderr, 
+			  	  "warn - failed on read errno %d \n", errno);
+				continue;
+			}
+			break;
+		}
+		cbuf->size = n;
+		cbuf->flag = 2;
+	}
+}
+
+static int init_ring_buffer(ring_buffer *rbuf,int size)
+{
+	int i;
+	for(i =0 ; i < size; i++){
+		// printf("%d 0x%x\n", i, (void *)&rbuf[i]);
+		rbuf[i].flag = 0;
+		if( i == size - 1 ) {
+			// printf("last! %d\n",i);
+			rbuf[i].next = &rbuf[0];
+		}else{
+			rbuf[i].next = &rbuf[i+1];
+		}
+
+	}
+	return 1;
+}
+
 static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 {
 	int code,i,n,m;
@@ -161,15 +233,25 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 
 	ARIB_STD_B25_PROGRAM_INFO pgrm;
 
-	uint8_t data[8*1024];
+	// uint8_t data[8*1024];
+	ring_buffer rbuf[3];
+	ring_buffer *cbuf;
+	pthread_t loader;
+	loader_args thread_args;
 
 	ARIB_STD_B25_BUFFER sbuf;
 	ARIB_STD_B25_BUFFER dbuf;
+
+
 
 	sfd = -1;
 	dfd = -1;
 	b25 = NULL;
 	bcas = NULL;
+
+	if( 1 != init_ring_buffer(rbuf,3)) {
+		goto LAST;
+	}
 
 	sfd = _open(src, _O_BINARY|_O_RDONLY|_O_SEQUENTIAL);
 	if(sfd < 0){
@@ -234,24 +316,33 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 		goto LAST;
 	}
 
-	offset = 0;
-	while( 1 ){
-		n = _read(sfd, data, sizeof(data));
-		if( n < 1 ){
-			if( errno == 75 ) {
-				fprintf(stderr, "warn - failed on read errno %d offset %d\n", errno, (int) offset);
-				continue;
-			}
-			break;
-		}
-		sbuf.data = data;
-		sbuf.size = n;
+	thread_args.sfd  = sfd;
+	thread_args.b25 = b25;
+	thread_args.rbuf = rbuf;
 
+	if( 0 > pthread_create(&loader,NULL, loader_main, (void *)&thread_args) ) {
+		printf("failed thread creation \n");
+		goto LAST;
+	}
+
+	offset = 0;
+	cbuf = &rbuf[0];
+	while( 1 ){
+		if(cbuf->flag != 2 ){
+			cbuf = cbuf->next;
+			continue;
+		}
+
+		sbuf.data = cbuf->data;
+		sbuf.size = cbuf->size;
+
+		cbuf->flag = 3;
 		code = b25->put(b25, &sbuf);
 		if(code < 0){
 			fprintf(stderr, "error - failed on ARIB_STD_B25::put() : code=%d\n", code);
 			goto LAST;
 		}
+		cbuf->flag = 0;
 
 		code = b25->get(b25, &dbuf);
 		if(code < 0){
