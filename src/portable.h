@@ -33,6 +33,7 @@ typedef   signed __int64  int64_t;
 	#define _O_TRUNC      (O_TRUNC)
 	#define _S_IREAD      (S_IRUSR|S_IRGRP|S_IROTH)
 	#define _S_IWRITE     (S_IWUSR|S_IWGRP|S_IWOTH)
+	#define HAS_FADVISE
 #endif
 
 #endif /* PORTABLE_H */

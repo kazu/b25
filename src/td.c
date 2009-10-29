@@ -14,6 +14,7 @@
 	#define __STDC_FORMAT_MACROS
 	#include <inttypes.h>
 	#include <unistd.h>
+        #include <errno.h>
 #endif
 
 #include "arib_std_b25.h"
@@ -175,7 +176,12 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 		fprintf(stderr, "error - failed on _open(%s) [src]\n", src);
 		goto LAST;
 	}
-	
+#ifdef HAS_FADVISE
+	if( -1 == posix_fadvise(sfd, 0, 0, POSIX_FADV_SEQUENTIAL) ){
+		fprintf(stderr, "warn - posix_fadvise errno %d \n",errno);
+	}
+#endif
+
 	_lseeki64(sfd, 0, SEEK_END);
 	total = _telli64(sfd);
 	_lseeki64(sfd, 0, SEEK_SET);
@@ -229,7 +235,15 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 	}
 
 	offset = 0;
-	while( (n = _read(sfd, data, sizeof(data))) > 0 ){
+	while( 1 ){
+		n = _read(sfd, data, sizeof(data));
+		if( n < 1 ){
+			if( errno == 75 ) {
+				fprintf(stderr, "warn - failed on read errno %d offset %d\n", errno, (int) offset);
+				continue;
+			}
+			break;
+		}
 		sbuf.data = data;
 		sbuf.size = n;
 
