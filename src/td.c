@@ -26,6 +26,18 @@
 #include "arib_std_b25.h"
 #include "b_cas_card.h"
 
+#ifdef _LOADER_DEBUG
+# define DEBUG(f,a...) fprintf(stderr, f, ## a)
+#else
+# define DEBUG(f, a...) do { ; } while(0)
+#endif
+
+#ifdef _WAKE_BROADCAST
+#define wake_thread(a)  pthread_cond_broadcast(a)
+#else
+#define wake_thread(a)  pthread_cond_signal(a)
+#endif
+
 typedef struct {
 	int32_t round;
 	int32_t strip;
@@ -204,45 +216,47 @@ void *loader_main(void *args)
 	while(1) {
 		if(used ==  RING_BUF_SIZE ){
 			//futex(&used,FUTEX_WAIT,2,NULL);
-			printf("loader sleep %d \n", used);
-			pthread_cond_broadcast(&wcond);
+			DEBUG("loader sleep used: %d \n", used);
+			wake_thread(&wcond);
 			pthread_cond_wait(&rcond, &mut);
 			// pthread_cond_broadcast(&wcond);
-			printf("loader wake \n");
+			DEBUG("loader wake used: %d \n", used);
 			continue;	
 		}
 	  	if(cbuf->flag != 0 ){
 			cbuf = cbuf->next;
+			//pthread_cond_broadcast(&wcond);
 			continue;
 		}
-		cbuf->flag = 1;
 		if(poll(pfd, 1, 1)){
 		       if(pfd[0].revents & POLLIN){
+				cbuf->flag = 1;
 			        used++;
 				n = _read(sfd, cbuf->data, sizeof(cbuf->data));
 				if( n < 1 ){
 					used--;
 					if( errno == 75 ) {
-						fprintf(stderr, 
-								"warn - failed on read errno %d \n", errno);
+						 
+						DEBUG("warn - failed on read errno %d \n", errno);
 						cbuf->flag = 0;
 						continue;
 					}
-					fprintf(stderr, "loader error finish code: %d  ret: %d\n", errno, n);
+					DEBUG( "loader error finish code: %d  ret: %d\n", errno, n);
+					cbuf->flag = 0;
 					break;
 				}
 				cbuf->size = n;
 				cbuf->flag = 2;
-				pthread_cond_broadcast(&wcond);
-				//printf("wakeup writer from loader\n");
+				wake_thread(&wcond);
+				DEBUG("wakeup writer from loader used: %d\n",used);
 				//futex(&used,FUTEX_WAKE,2,NULL);
 		       }
 		}
 		cbuf = cbuf->next;
 	}
-	fprintf(stderr,"fin loader\n");
-	pthread_cond_broadcast(&wcond);
+	DEBUG("fin loader\n");
 	loader_status = -1;
+	wake_thread(&wcond);
 	return 0;
 }
 
@@ -377,25 +391,16 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 			goto LAST;
 		}
 #endif 
-		if(used == 0) {
-			if(loader_status == -1) {
-				pthread_join(loader, NULL);
-				break;
-			}
-			fprintf(stderr,"writer2 wait used %d\n",used);
-			//pthread_cond_broadcast(&rcond);
-			pthread_cond_wait(&wcond,&mut2);
-			fprintf(stderr,"writer2 wake used %d\n",used);
-			//pthread_cond_broadcast(&rcond);
-			// futex(&used,FUTEX_WAIT,2,NULL);
-		 	continue;
+		if(loader_status == -1) {
+			pthread_join(loader, NULL);
+			break;
 		}
 		if(cbuf->flag != 2 ){
-			fprintf(stderr,"writer wait %d\n",cbuf->flag);
+			DEBUG("writer wait flag:%d used:%d\n",cbuf->flag, used);
 			//pthread_cond_broadcast(&rcond);
 			pthread_cond_wait(&wcond,&mut2);
 			//pthread_cond_broadcast(&rcond);
-			fprintf(stderr,"writer wake\n");
+			DEBUG("writer wake flag:%d used:%d\n",cbuf->flag, used);
 			// cbuf = cbuf->next;
 			continue;
 		}
@@ -412,7 +417,7 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 		cbuf->flag = 0;
 		used--;
 		// futex(&used,FUTEX_WAKE,2,NULL);
-		pthread_cond_broadcast(&rcond);
+		wake_thread(&rcond);
 
 		code = b25->get(b25, &dbuf);
 		if(code < 0){
@@ -498,7 +503,7 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 
 LAST:
 
-	printf("last\n");
+	DEBUG("last\n");
 
 	if(sfd >= 0){
 		_close(sfd);
