@@ -16,7 +16,12 @@
 	#include <unistd.h>
         #include <errno.h>
 	#include <pthread.h>
+	#include <sys/poll.h>
+	#include <linux/futex.h>
+	#include <sys/time.h>
+	#include <signal.h>
 #endif
+
 
 #include "arib_std_b25.h"
 #include "b_cas_card.h"
@@ -43,7 +48,7 @@ typedef struct {
   ARIB_STD_B25 *b25;
 } loader_args; 
 
-
+#define RING_BUF_SIZE  (10)
 
 static void show_usage();
 static int parse_arg(OPTION *dst, int argc, char **argv);
@@ -51,6 +56,13 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt);
 static void show_bcas_power_on_control_info(B_CAS_CARD *bcas);
 static int init_ring_buffer(ring_buffer *rbuf,int size);
 
+int used = 0;
+int loader_status = 0;
+
+pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mut2 = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t rcond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t wcond = PTHREAD_COND_INITIALIZER;
 
 int main(int argc, char **argv)
 {
@@ -175,32 +187,63 @@ void *loader_main(void *args)
 	ring_buffer *rbuf;
 	ARIB_STD_B25 *b25;
 	ring_buffer *cbuf;
+	struct pollfd pfd[1];
 
 	sfd = largs->sfd;
 	rbuf = largs->rbuf;
 	b25 = largs->b25;
 
+
+        loader_status = 1;
+	pfd[0].fd = sfd;
+	pfd[0].events = POLLIN;
+
 	//printf("called!\n");
 
 	cbuf = &rbuf[0];
 	while(1) {
+		if(used ==  RING_BUF_SIZE ){
+			//futex(&used,FUTEX_WAIT,2,NULL);
+			printf("loader sleep %d \n", used);
+			pthread_cond_broadcast(&wcond);
+			pthread_cond_wait(&rcond, &mut);
+			// pthread_cond_broadcast(&wcond);
+			printf("loader wake \n");
+			continue;	
+		}
 	  	if(cbuf->flag != 0 ){
 			cbuf = cbuf->next;
 			continue;
 		}
 		cbuf->flag = 1;
-		n = _read(sfd, cbuf->data, sizeof(cbuf->data));
-		if( n < 1 ){
-			if( errno == 75 ) {
-				fprintf(stderr, 
-			  	  "warn - failed on read errno %d \n", errno);
-				continue;
-			}
-			break;
+		if(poll(pfd, 1, 1)){
+		       if(pfd[0].revents & POLLIN){
+			        used++;
+				n = _read(sfd, cbuf->data, sizeof(cbuf->data));
+				if( n < 1 ){
+					used--;
+					if( errno == 75 ) {
+						fprintf(stderr, 
+								"warn - failed on read errno %d \n", errno);
+						cbuf->flag = 0;
+						continue;
+					}
+					fprintf(stderr, "loader error finish code: %d  ret: %d\n", errno, n);
+					break;
+				}
+				cbuf->size = n;
+				cbuf->flag = 2;
+				pthread_cond_broadcast(&wcond);
+				//printf("wakeup writer from loader\n");
+				//futex(&used,FUTEX_WAKE,2,NULL);
+		       }
 		}
-		cbuf->size = n;
-		cbuf->flag = 2;
+		cbuf = cbuf->next;
 	}
+	fprintf(stderr,"fin loader\n");
+	pthread_cond_broadcast(&wcond);
+	loader_status = -1;
+	return 0;
 }
 
 static int init_ring_buffer(ring_buffer *rbuf,int size)
@@ -234,7 +277,7 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 	ARIB_STD_B25_PROGRAM_INFO pgrm;
 
 	// uint8_t data[8*1024];
-	ring_buffer rbuf[3];
+	ring_buffer rbuf[RING_BUF_SIZE];
 	ring_buffer *cbuf;
 	pthread_t loader;
 	loader_args thread_args;
@@ -249,7 +292,7 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 	b25 = NULL;
 	bcas = NULL;
 
-	if( 1 != init_ring_buffer(rbuf,3)) {
+	if( 1 != init_ring_buffer(rbuf,RING_BUF_SIZE)) {
 		goto LAST;
 	}
 
@@ -327,9 +370,33 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 
 	offset = 0;
 	cbuf = &rbuf[0];
-	while( 1 ){
+	while(1){
+
+#if 0
+		if( offset > 30000000 ){
+			goto LAST;
+		}
+#endif 
+		if(used == 0) {
+			if(loader_status == -1) {
+				pthread_join(loader, NULL);
+				break;
+			}
+			fprintf(stderr,"writer2 wait used %d\n",used);
+			//pthread_cond_broadcast(&rcond);
+			pthread_cond_wait(&wcond,&mut2);
+			fprintf(stderr,"writer2 wake used %d\n",used);
+			//pthread_cond_broadcast(&rcond);
+			// futex(&used,FUTEX_WAIT,2,NULL);
+		 	continue;
+		}
 		if(cbuf->flag != 2 ){
-			cbuf = cbuf->next;
+			fprintf(stderr,"writer wait %d\n",cbuf->flag);
+			//pthread_cond_broadcast(&rcond);
+			pthread_cond_wait(&wcond,&mut2);
+			//pthread_cond_broadcast(&rcond);
+			fprintf(stderr,"writer wake\n");
+			// cbuf = cbuf->next;
 			continue;
 		}
 
@@ -343,6 +410,9 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 			goto LAST;
 		}
 		cbuf->flag = 0;
+		used--;
+		// futex(&used,FUTEX_WAKE,2,NULL);
+		pthread_cond_broadcast(&rcond);
 
 		code = b25->get(b25, &dbuf);
 		if(code < 0){
@@ -363,6 +433,7 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 			m = (int)(10000*offset/total);
 			fprintf(stderr, "\rprocessing: %2d.%02d%% ", m/100, m%100);
 		}
+		cbuf = cbuf->next;
 	}
 
 	code = b25->flush(b25);
@@ -383,6 +454,10 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 			fprintf(stderr, "error - failed on _write(%d)\n", dbuf.size);
 			goto LAST;
 		}
+	}
+
+	if( offset > 10000 ){
+		goto LAST;
 	}
 
 	if(opt->verbose != 0){
@@ -422,6 +497,8 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 	}
 
 LAST:
+
+	printf("last\n");
 
 	if(sfd >= 0){
 		_close(sfd);

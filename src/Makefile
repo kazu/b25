@@ -3,7 +3,7 @@ PCSC_CFLAGS ?= `pkg-config libpcsclite --cflags`
 PCSC_LDLIBS ?= `pkg-config libpcsclite --libs`
 
 CC     = gcc
-CFLAGS = -Wall -O2 -g $(PCSC_CFLAGS) -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
+CFLAGS = -Wall -O3 -g  $(PCSC_CFLAGS) -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
 LDLIBS = $(PCSC_LDLIBS) -lm
  
 TARGET = b25
