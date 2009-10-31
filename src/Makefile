@@ -3,7 +3,7 @@ PCSC_CFLAGS ?= `pkg-config libpcsclite --cflags`
 PCSC_LDLIBS ?= `pkg-config libpcsclite --libs`
 
 CC     = gcc
-CFLAGS = -Wall -O3 -g  $(PCSC_CFLAGS) -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -D_LOADER_DEBUG
+CFLAGS = -Wall -O3 $(PCSC_CFLAGS) -fPIC -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -D_WAKE_BROADCAST # -D_LOADER_DEBUG
 LDLIBS = $(PCSC_LDLIBS) -lm
  
 TARGET = b25
@@ -20,6 +20,8 @@ ts_section_parser.o: ts_section_parser.c ts_section_parser.h ts_common_types.h p
 $(TARGET): $(OBJS)
 	$(CC) $(LDLIBS) -o $(TARGET) $(OBJS)
 
+libb25: $(OBJS)
+	$(CC) $(LDLIBS) -shared -Wl,-soname,libb25.so.0 -o libb25.so $(OBJS)
 clean:
 	rm -f *.o
 	rm -f $(TARGET)

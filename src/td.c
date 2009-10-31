@@ -19,6 +19,7 @@
 	#include <sys/poll.h>
 	#include <linux/futex.h>
 	#include <sys/time.h>
+	#include <sys/resource.h>
 	#include <signal.h>
 #endif
 
@@ -70,11 +71,22 @@ static int init_ring_buffer(ring_buffer *rbuf,int size);
 
 int used = 0;
 int loader_status = 0;
+double r1 = 0;
 
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mut2 = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t rcond = PTHREAD_COND_INITIALIZER;
 pthread_cond_t wcond = PTHREAD_COND_INITIALIZER;
+
+
+double gettimeofday_sec()
+{
+	struct rusage t;
+	struct timeval tv;
+	getrusage(RUSAGE_SELF, &t);
+	tv = t.ru_utime;
+	return tv.tv_sec + (double)tv.tv_usec*1e-6;
+}
 
 int main(int argc, char **argv)
 {
@@ -200,10 +212,12 @@ void *loader_main(void *args)
 	ARIB_STD_B25 *b25;
 	ring_buffer *cbuf;
 	struct pollfd pfd[1];
+	double r2 = 0;
 
 	sfd = largs->sfd;
 	rbuf = largs->rbuf;
 	b25 = largs->b25;
+
 
 
         loader_status = 1;
@@ -232,7 +246,9 @@ void *loader_main(void *args)
 		       if(pfd[0].revents & POLLIN){
 				cbuf->flag = 1;
 			        used++;
+				r2 = gettimeofday_sec();
 				n = _read(sfd, cbuf->data, sizeof(cbuf->data));
+				r1 +=  (gettimeofday_sec() - r2);
 				if( n < 1 ){
 					used--;
 					if( errno == 75 ) {
@@ -298,7 +314,9 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 
 	ARIB_STD_B25_BUFFER sbuf;
 	ARIB_STD_B25_BUFFER dbuf;
-
+	int count = 0;
+	double t1 = 0 ,t2 = 0;
+	double w1 = 0 , w2 = 0;
 
 
 	sfd = -1;
@@ -409,6 +427,8 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 		sbuf.size = cbuf->size;
 
 		cbuf->flag = 3;
+
+		t2 = gettimeofday_sec();
 		code = b25->put(b25, &sbuf);
 		if(code < 0){
 			fprintf(stderr, "error - failed on ARIB_STD_B25::put() : code=%d\n", code);
@@ -418,20 +438,24 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 		used--;
 		// futex(&used,FUTEX_WAKE,2,NULL);
 		wake_thread(&rcond);
-
 		code = b25->get(b25, &dbuf);
+		t1 +=  (gettimeofday_sec() - t2);
+
 		if(code < 0){
 			fprintf(stderr, "error - failed on ARIB_STD_B25::get() : code=%d\n", code);
 			goto LAST;
 		}
 
 		if(dbuf.size > 0){
+			w2 = gettimeofday_sec();
 			n = _write(dfd, dbuf.data, dbuf.size);
+			w1 +=  (gettimeofday_sec() - w2);
 			if(n != dbuf.size){
 				fprintf(stderr, "error failed on _write(%d)\n", dbuf.size);
 				goto LAST;
 			}
 		}
+		count++;
 		
 		offset += sbuf.size;
 		if(opt->verbose != 0){
@@ -504,7 +528,10 @@ static void test_arib_std_b25(const char *src, const char *dst, OPTION *opt)
 LAST:
 
 	DEBUG("last\n");
-
+	fprintf(stderr,"b25 time= = %10.30f \n",t1);
+	fprintf(stderr,"read time= = %10.30f \n",r1);
+	fprintf(stderr,"write time= = %10.30f \n",w1);
+	fprintf(stderr,"count of decrypt: %d\n", count);
 	if(sfd >= 0){
 		_close(sfd);
 		sfd = -1;
